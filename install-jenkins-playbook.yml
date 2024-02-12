@@ -1,0 +1,118 @@
+---
+- name: Install jenkins
+  hosts: servers
+  become: yes
+  vars:
+      kubectl_version: "v1.29.0"
+  tasks:
+  - name: Update all packages to their latest version
+    apt:
+      name: "*"
+      state: latest
+
+  - name: Install required packages
+    ansible.builtin.apt:
+      name:
+        - apt-transport-https
+        - ca-certificates
+        - curl
+        - software-properties-common
+      state: present
+      update_cache: yes
+
+  - name: Add Docker’s official GPG key
+    ansible.builtin.apt_key:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      state: present
+
+  - name: Add Docker apt repository
+    ansible.builtin.apt_repository:
+      repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+      state: present
+
+  - name: Install Docker CE
+    ansible.builtin.apt:
+      name: docker-ce
+      state: latest
+      update_cache: yes
+
+  - name: Ensure Docker service is running
+    ansible.builtin.systemd:
+      name: docker
+      state: started
+      enabled: yes
+
+  - name: Ensure docker group exists
+    ansible.builtin.group:
+      name: docker
+      state: present
+
+  - name: Add user to docker group
+    ansible.builtin.user:
+      name: "{{ ansible_user }}"
+      groups: docker
+      append: yes   
+
+  - name: Install Docker Compose
+    apt:
+      name: docker-compose
+      state: latest
+      update_cache: yes
+
+  - name: Deploy Jenkins using Docker Compose
+    blockinfile:
+      path: ~/docker-compose.yml
+      create: yes
+      block: |
+        version: '3'
+        services:
+          jenkins:
+            image: jenkins/jenkins:lts
+            restart: always
+            privileged: true
+            user: root
+            ports:
+              - "8080:8080"
+              - "50000:50000"
+            container_name: jenkins
+            volumes:
+              - /var/jenkins_home:/var/jenkins_home
+              - /usr/bin/docker:/usr/bin/docker
+              - /var/run/docker.sock:/var/run/docker.sock
+
+  - name: Create Jenkins home directory
+    file:
+      path: /var/jenkins_home
+      state: directory
+      owner: "{{ ansible_env.USER }}"
+      mode: '0777'
+
+  - name: Start Jenkins container
+    shell: docker-compose -f ~/docker-compose.yml up -d
+    args:
+      chdir: ~
+      executable: /bin/bash
+
+  - name: Wait for 30 seconds
+    pause:
+      seconds: 30
+
+  - name: Install kubectl in Jenkins container
+    ansible.builtin.shell: |
+      docker exec jenkins /bin/sh -c "curl -sSL -o /usr/local/bin/kubectl https://storage.googleapis.com/kubernetes-release/release/{{ kubectl_version }}/bin/linux/amd64/kubectl && chmod +x /usr/local/bin/kubectl"
+
+  - name: Get initialAdminPassword from Jenkins container
+    ansible.builtin.shell: |
+      docker exec jenkins cat /var/jenkins_home/secrets/initialAdminPassword
+    register: jenkins_password
+    changed_when: false
+    check_mode: false
+
+  - name: Save Jenkins initial admin password to a file in the current directory
+    ansible.builtin.copy:
+      content: "{{ jenkins_password.stdout }}"
+      dest: "./jenkins-initial-admin-password.txt"
+    delegate_to: localhost
+    become: no
+    run_once: true
+    

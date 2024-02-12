@@ -1,0 +1,269 @@
+# Ansible playbook to install the required packages on the master and worker nodes
+- hosts: all
+  become: yes # Run as root
+
+  tasks:
+    - name: Configure containerd
+      shell: |
+        sudo tee /etc/modules-load.d/containerd.conf <<EOF
+        overlay
+        br_netfilter
+        EOF
+        sudo modprobe overlay
+        sudo modprobe br_netfilter
+
+    - name: Configure kernel
+      shell: |
+        sudo tee /etc/sysctl.d/kubernetes.conf <<EOF
+        net.bridge.bridge-nf-call-ip6tables = 1
+        net.bridge.bridge-nf-call-iptables = 1
+        net.ipv4.ip_forward = 1
+        EOF
+
+    - name: Apply changes
+      shell: sudo sysctl --system
+
+    - name: Install containerd dependencies
+      apt:
+        name: [ 'apt-transport-https','ca-certificates','curl','gnupg-agent','software-properties-common' ]
+        state: present
+        update_cache: yes
+
+    - name: Add containerd gpg key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add containerd software repository
+      apt_repository:
+        repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu jammy stable
+        state: present
+        filename: docker.list
+        update_cache: yes
+
+    - name: Install containerd
+      apt:
+        name: [ 'containerd.io' ]
+        state: present
+        update_cache: yes
+
+    - name: Configure containerd
+      shell: |
+        sudo mkdir -p /etc/containerd
+        sudo containerd config default | sudo tee /etc/containerd/config.toml
+        sudo sed -i 's/SystemdCgroup \= false/SystemdCgroup \= true/g' /etc/containerd/config.toml
+
+    - name: Restart and enable containerd
+      systemd:
+        name: containerd
+        state: restarted
+        enabled: yes
+
+    - name: Disable swap
+      shell: swapoff -a
+
+    - name: Stop swap from mounting
+      shell: sed -i 's/^\/swap/#\/swap/g' /etc/fstab
+
+    - name: Install dependencies
+      apt:
+        name: [ 'apt-transport-https','ca-certificates','curl','gnupg-agent','software-properties-common' ]
+        state: present
+        update_cache: yes
+
+    - name: Add Kubernetes gpg key
+      apt_key:
+        url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+        state: present
+
+    - name: Add Kubernetes software repository
+      apt_repository:
+        repo: deb https://apt.kubernetes.io/ kubernetes-xenial main
+        state: present
+        filename: kubernetes.list
+        update_cache: yes
+
+    - name: Install kubernetes
+      apt:
+        name: [ 'kubelet','kubeadm','kubectl' ]
+        state: present
+        update_cache: yes
+
+    - name: Hold kubelet package at current version
+      ansible.builtin.dpkg_selections:
+        name: 'kubelet'
+        selection: hold
+
+    - name: Hold kubeadm package at current version
+      ansible.builtin.dpkg_selections:
+        name: 'kubeadm'
+        selection: hold
+
+    - name: Hold kubectl package at current version
+      ansible.builtin.dpkg_selections:
+        name: 'kubectl'
+        selection: hold
+
+    # Setup isci for Longhorn
+    - name: Install iscsi and nfs-common
+      apt:
+        name: [ 'open-iscsi', 'nfs-common' ]
+        state: present
+        update_cache: yes
+
+# Ansible playbook to initialize the master node
+- hosts: master
+  become: yes # Run as root
+
+  tasks:
+    - name: Set hostname to k8s-master
+      hostname:
+        name: k8s-master
+
+    - name: Check if the master node is already initialized
+      stat:
+        path: /etc/kubernetes/admin.conf
+      register: kubeadm_init
+
+    - name: Initialize the master node
+      command: kubeadm init --pod-network-cidr=10.244.0.0/16
+      when: kubeadm_init.stat.exists == false # Only run if the master node is not already initialized
+    
+    - name: Create .kube directory for ansible_user
+      file:
+        path: "/home/{{ ansible_user }}/.kube"
+        state: directory
+        mode: 0755
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+      when: kubeadm_init.stat.exists == false
+
+    - name: Copy the kube config file to ansible_user
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: "/home/{{ ansible_user }}/.kube/config"
+        remote_src: yes
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: 0644
+      when: kubeadm_init.stat.exists == false
+
+    - name: Install calico CNI
+      command: kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
+      become: yes
+      become_user: "{{ ansible_user }}"
+
+    - name: Get the token for joining the worker nodes
+      shell: kubeadm token create  --print-join-command
+      register: kubernetes_join_command
+      become: yes
+      become_user: "{{ ansible_user }}"
+
+    - name: Copy join command to local file
+      local_action:
+        module: copy 
+        content: "{{ kubernetes_join_command.stdout }}"
+        dest: "./join_command.txt"
+      become: false
+      run_once: true
+      when: kubernetes_join_command is defined
+
+    - name: Display registered output
+      debug:
+        var: kubernetes_join_command.stdout_lines
+
+    - name: Set strictARP for metallb
+      shell: |
+        kubectl get configmap kube-proxy -n kube-system -o yaml | \
+        sed -e "s/strictARP: false/strictARP: true/" | \
+        kubectl apply -f - -n kube-system
+      become: yes
+      become_user: "{{ ansible_user }}"
+
+    - name: Install metallb namespace
+      command: kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.10.3/manifests/namespace.yaml
+      become: yes
+      become_user: "{{ ansible_user }}"
+
+    - name: Install metallb
+      command: kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.13.12/config/manifests/metallb-native.yaml
+      become: yes
+      become_user: "{{ ansible_user }}"
+
+# Ansible playbook to join the worker nodes to the cluster
+- hosts: worker
+  become: yes # Run as root
+
+  tasks:
+    - name: Set hostname for k8s-node1
+      hostname:
+        name: k8s-node1
+      when: inventory_hostname == "{{ k8s_node1 }}"
+      ignore_errors: yes
+
+    - name: Set hostname for k8s-node2
+      hostname:
+        name: k8s-node2
+      when: inventory_hostname == "{{ k8s_node2 }}"
+      ignore_errors: yes
+
+    - name: Check if the worker node is already joined
+      stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: kubeadm_join
+
+    - name: Read join command from local file
+      local_action: command cat ./join_command.txt
+      register: join_command
+      run_once: true
+      become: false
+
+    - name: Join the worker nodes to the cluster
+      command: "{{ join_command.stdout }}"
+      become: yes
+      when: kubeadm_join.stat.exists == false
+
+ # Ansible playbook Setup Metallb and Longhorn to the master node
+- hosts: master
+  become: yes # Run as root   
+
+  tasks:
+    # Setup Metallb
+    - name: Copy metallb config file
+      copy:
+        src: "{{ playbook_dir }}/metallb-config.yaml"
+        dest: "/home/{{ ansible_user }}/metallb-config.yaml"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: 0644
+
+    - name: Wait for 2 minutes
+      pause:
+        minutes: 2
+
+    - name: Install metallb config
+      command: kubectl apply -f "/home/{{ ansible_user }}/metallb-config.yaml"
+      become: yes
+      become_user: "{{ ansible_user }}"
+
+    - name: Rolling restart of metallb pods
+      command: kubectl rollout restart deployment controller -n metallb-system
+      become: yes
+      become_user: "{{ ansible_user }}"
+
+    # Setup Longhorn
+    - name: Remove taint from master node to allow disk replication
+      command: kubectl taint nodes k8s-master node-role.kubernetes.io/control-plane-
+      ignore_errors: yes
+      become: yes
+      become_user: "{{ ansible_user }}"
+
+    - name: Install Longhorn
+      command: kubectl apply -f https://raw.githubusercontent.com/longhorn/longhorn/v1.5.3/deploy/longhorn.yaml
+      become: yes
+      become_user: "{{ ansible_user }}"
+
+    - name: Create dummy host to store variable for node config
+      add_host:
+        name: "DUMMY_HOST"
+        JOIN_COMMAND: "{{ kubernetes_join_command.stdout_lines[0] }}"

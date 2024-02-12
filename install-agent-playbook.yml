@@ -1,0 +1,67 @@
+---
+- name: Install agent
+  hosts: servers
+  become: yes
+
+  tasks:
+  - name: Update all packages to their latest version
+    apt:
+      name: "*"
+      state: latest
+
+  - name: Install required packages
+    ansible.builtin.apt:
+      name:
+        - apt-transport-https
+        - ca-certificates
+        - curl
+        - software-properties-common
+      state: present
+      update_cache: yes
+
+  - name: Add Docker’s official GPG key
+    ansible.builtin.apt_key:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      state: present
+
+  - name: Add Docker apt repository
+    ansible.builtin.apt_repository:
+      repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+      state: present
+
+  - name: Install Docker CE
+    ansible.builtin.apt:
+      name: docker-ce
+      state: latest
+      update_cache: yes
+
+  - name: Ensure Docker service is running
+    ansible.builtin.systemd:
+      name: docker
+      state: started
+      enabled: yes
+
+  - name: Ensure docker group exists
+    ansible.builtin.group:
+      name: docker
+      state: present
+
+  - name: Add user to docker group
+    ansible.builtin.user:
+      name: "{{ ansible_user }}"
+      groups: docker
+      append: yes
+
+  - name: Install fontconfig
+    shell: apt install fontconfig -y    
+
+  - name: Install java
+    shell: apt install fontconfig openjdk-17-jre -y  
+
+  - name: Download kubectl
+    get_url:
+      url: https://storage.googleapis.com/kubernetes-release/release/{{ kubectl_version }}/bin/linux/amd64/kubectl
+      dest: /usr/local/bin/kubectl
+      mode: '0755'
+    vars:
+      kubectl_version: "v1.29.0"

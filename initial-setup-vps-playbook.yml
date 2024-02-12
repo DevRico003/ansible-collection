@@ -1,0 +1,77 @@
+---
+- hosts: servers
+  become: true
+  vars:
+    new_user: "rico003"
+    ssh_public_key: "/home/rico003/.ssh/contabo_vps_ec.pub"
+
+  tasks:
+    - name: Create a new user
+      user:
+        name: "{{ new_user }}"
+        state: present
+        create_home: yes
+        shell: /bin/bash
+
+    - name: Add authorized key for the new user
+      authorized_key:
+        user: "{{ new_user }}"
+        state: present
+        key: "{{ lookup('file', ssh_public_key) }}"
+
+    - name: Add new user to sudoers
+      lineinfile:
+        path: /etc/sudoers
+        state: present
+        regexp: "^{{ new_user }}"
+        line: "{{ new_user }} ALL=(ALL:ALL) NOPASSWD:ALL"
+        validate: visudo -cf %s
+
+    - name: Disable root SSH login
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        state: present
+        regexp: "^PermitRootLogin"
+        line: "PermitRootLogin no"
+      notify: restart ssh
+
+    - name: Disable password authentication
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        state: present
+        regexp: "^PasswordAuthentication"
+        line: "PasswordAuthentication no"
+      notify: restart ssh
+
+    - name: Disable empty passwords
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        state: present
+        regexp: "^PermitEmptyPasswords"
+        line: "PermitEmptyPasswords no"
+      notify: restart ssh
+
+    # Update and upgrade tasks
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600 # Cache valid time in seconds
+
+    - name: Wait for 1 minute
+      pause:
+        minutes: 1
+
+    - name: Upgrade all packages to the latest version
+      apt:
+        upgrade: 'dist'
+        force_apt_get: yes
+
+    - name: Wait for 1 minute
+      pause:
+        minutes: 1
+
+  handlers:
+    - name: restart ssh
+      service:
+        name: ssh
+        state: restarted
