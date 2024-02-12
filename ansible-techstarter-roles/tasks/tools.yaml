@@ -1,0 +1,67 @@
+# Docker Installation
+- name: Install required packages
+  ansible.builtin.apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - software-properties-common
+    state: present
+    update_cache: yes
+
+- name: Add Docker’s official GPG key
+  ansible.builtin.apt_key:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    state: present
+
+- name: Add Docker apt repository
+  ansible.builtin.apt_repository:
+    repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+    state: present
+
+- name: Install Docker CE
+  ansible.builtin.apt:
+    name: docker-ce
+    state: present
+    update_cache: yes
+
+- name: Ensure Docker service is running
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: yes
+
+- name: Ensure docker group exists
+  ansible.builtin.group:
+    name: docker
+    state: present
+
+- name: Add user to docker group
+  ansible.builtin.user:
+    name: "{{ ansible_user }}"
+    groups: docker
+    append: yes
+
+# Nginx Container
+- name: Stop and remove existing Nginx container if it exists
+  community.docker.docker_container:
+    name: nginx
+    state: absent
+
+- name: Copy index.html to server
+  ansible.builtin.copy:
+    src: ~/ansible-techstarter/index.html
+    dest: ~/index.html
+    mode: '0644'
+
+- name: Start Nginx Container
+  community.docker.docker_container:
+    name: nginx
+    image: nginx
+    state: started
+    restart_policy: always
+    published_ports:
+      - "80:80"
+    volumes:
+      - ~/index.html:/usr/share/nginx/html/index.html
+

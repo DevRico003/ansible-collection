@@ -1,0 +1,5 @@
+---
+- hosts: servers
+  become: yes 
+  roles: 
+    - DevRico003.ansible-latest-docker-role

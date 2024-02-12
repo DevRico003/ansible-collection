@@ -1,0 +1,23 @@
+---
+# tasks file for nginx-container
+- name: Stop and remove existing Nginx container if it exists
+  community.docker.docker_container:
+    name: nginx
+    state: absent
+
+- name: Copy index.html to server
+  ansible.builtin.copy:
+    src: ~/index.html
+    dest: ~/index.html
+    mode: '0644'
+
+- name: Start Nginx Container
+  community.docker.docker_container:
+    name: nginx
+    image: nginx
+    state: started
+    restart_policy: always
+    published_ports:
+      - "80:80"
+    volumes:
+      - ~/index.html:/usr/share/nginx/html/index.html
